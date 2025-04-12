@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: bookstore-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: adminadmin
+      MYSQL_DATABASE: bookstore
+      MYSQL_USER: admin
+      MYSQL_PASSWORD: adminadmin
+    ports:
+      - '3306:3306'
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql-scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+    # No need for env_file here unless you have one specifically for DB config
+
+  recommendation-engine:
+    image: pmerson/book-recommendations-ms
+    ports:
+      - '8080:8080'
+    command: ['--delay=0']
+
+  book-service:
+    build:
+      context: ./book-service
+    depends_on:
+      - db
+      - recommendation-engine
+    ports:
+      - '3001:3000'
+    env_file:
+      - ./book-service/.env
+
+  customer-service:
+    build:
+      context: ./customer-service
+    depends_on:
+      - db
+    ports:
+      - '3002:3000'
+    env_file:
+      - ./customer-service/.env
+
+  bff-web:
+    build:
+      context: ./bff-web
+    depends_on:
+      - book-service
+      - customer-service
+    ports:
+      - '3003:80'
+    env_file:
+      - ./bff-web/.env
+
+  bff-mobile:
+    build:
+      context: ./bff-mobile
+    depends_on:
+      - book-service
+      - customer-service
+    ports:
+      - '3004:80'
+    env_file:
+      - ./bff-mobile/.env
+
+  crm-service:
+    build:
+      context: ./crm-service
+    depends_on:
+      - db
+    ports:
+      - '3005:3000'
+    env_file:
+      - ./crm-service/.env
+
+  kafka:
+  image: bitnami/kafka:latest
+  ports:
+    - '9092:9092'
+  environment:
+    KAFKA_CFG_ZOOKEEPER_CONNECT: zookeeper:2181
+    KAFKA_CFG_LISTENERS: PLAINTEXT://:9092
+    KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+    ALLOW_PLAINTEXT_LISTENER: 'yes'
+
+zookeeper:
+  image: bitnami/zookeeper:latest
+  ports:
+    - '2181:2181'
+  environment:
+    ALLOW_ANONYMOUS_LOGIN: 'yes'
+
+volumes:
+  mysql_data:
