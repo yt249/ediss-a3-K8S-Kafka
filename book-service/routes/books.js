@@ -2,21 +2,95 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const axios = require('axios');
+const CircuitBreaker = require('opossum');
 
-// Circuit breaker state (in-memory)
-let circuitOpen = false;
-let lastFailureTime = null;
-const CIRCUIT_TIMEOUT = 60000; // 60 seconds
-const REQUEST_TIMEOUT = 3000; // 3 seconds
+// Service protection settings
+const REQUEST_TIMEOUT = 3000; // 3 seconds timeout
+const RESET_DURATION = 60000; // 60 seconds before retry
+const FAILURE_THRESHOLD = 1; // Open circuit after 1 failure
+const MONITORING_INTERVAL = 60000; // Monitor failures for 60 seconds
+const BUCKET_SIZE = 10; // Track in 10 buckets of 6 seconds each
 
-const RECOMMENDATION_API_BASE =
-  process.env.RECOMMENDATION_API_URL || 'http://localhost:8080';
+// Service endpoint configuration
+const RECOMMENDATION_ENDPOINT = process.env.RECOMMENDATION_API_URL || 'http://localhost:8080';
 
-// Function to validate price format
-const isValidPrice = (price) => {
+// Price validation helper
+const validatePrice = (price) => {
   const priceStr = typeof price === 'number' ? price.toString() : price;
   return /^(\d+)\.(\d{2})$/.test(priceStr) && parseFloat(priceStr) > 0;
 };
+
+// Custom service error class
+class ServiceError extends Error {
+  constructor(message, type = 'UNKNOWN') {
+    super(message);
+    this.name = 'ServiceError';
+    this.type = type;
+  }
+}
+
+// Initialize service protection
+const serviceGuard = new CircuitBreaker(
+  async (isbn) => {
+    console.log(`[Service] Fetching recommendations for ISBN: ${isbn}`);
+    
+    return new Promise((resolve, reject) => {
+      const requestTimer = setTimeout(() => {
+        console.log(`[Timeout] Request exceeded ${REQUEST_TIMEOUT}ms limit`);
+        reject(new ServiceError('Service response timeout', 'TIMEOUT'));
+      }, REQUEST_TIMEOUT);
+      
+      axios.get(`${RECOMMENDATION_ENDPOINT}/recommendations/${isbn}`, { 
+        timeout: REQUEST_TIMEOUT
+      })
+      .then(response => {
+        clearTimeout(requestTimer);
+        resolve(response);
+      })
+      .catch(error => {
+        clearTimeout(requestTimer);
+        
+        if (error.code === 'ECONNABORTED' || 
+            error.code === 'ETIMEDOUT' || 
+            error.message.includes('timeout')) {
+          reject(new ServiceError('Service timeout', 'TIMEOUT'));
+        } else if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
+          reject(new ServiceError('Service unavailable', 'CONNECTION'));
+        } else {
+          reject(new ServiceError(error.message, 'SERVICE'));
+        }
+      });
+    });
+  },
+  {
+    timeout: REQUEST_TIMEOUT,
+    resetTimeout: RESET_DURATION,
+    errorThresholdPercentage: FAILURE_THRESHOLD,
+    rollingCountTimeout: MONITORING_INTERVAL,
+    rollingCountBuckets: BUCKET_SIZE
+  }
+);
+
+// Service protection event monitoring
+serviceGuard.on('open', () => {
+  console.log('[Protection] Service protection activated');
+});
+
+serviceGuard.on('halfOpen', () => {
+  console.log('[Protection] Testing service recovery');
+});
+
+serviceGuard.on('close', () => {
+  console.log('[Protection] Service restored to normal operation');
+});
+
+serviceGuard.on('timeout', () => {
+  console.log('[Protection] Service response too slow');
+});
+
+serviceGuard.on('reject', () => {
+  console.log('[Protection] Request blocked - service protection active');
+});
 
 // Add a book
 router.post('/', async (req, res) => {
@@ -35,7 +109,7 @@ router.post('/', async (req, res) => {
   }
 
   const priceValue = parseFloat(price);
-  if (!isValidPrice(priceValue)) {
+  if (!validatePrice(priceValue)) {
     return res.status(400).json({
       message:
         'Invalid price format. Must be a positive number with two decimal places.',
@@ -97,7 +171,7 @@ router.put('/:ISBN', async (req, res) => {
   }
 
   const priceValue = parseFloat(price);
-  if (!isValidPrice(priceValue)) {
+  if (!validatePrice(priceValue)) {
     return res.status(400).json({
       message:
         'Invalid price format. Must be a positive number with two decimal places.',
@@ -148,54 +222,75 @@ router.get(['/isbn/:ISBN', '/:ISBN'], async (req, res) => {
   }
 });
 
-// Related books endpoint
+// Related books endpoint with enhanced protection
 router.get('/:ISBN/related-books', async (req, res) => {
   const { ISBN } = req.params;
 
-  // Check if circuit is open
-  const now = Date.now();
-  if (circuitOpen && now - lastFailureTime < CIRCUIT_TIMEOUT) {
-    return res.status(503).json({ message: 'Circuit is open' });
-  }
-
   try {
-    const response = await axios.get(
-      `${RECOMMENDATION_API_BASE}/recommendations/${ISBN}`,
-      {
-        timeout: REQUEST_TIMEOUT,
+    if (serviceGuard.status.state === 'open') {
+      return res.status(503).json({
+        status: 'unavailable',
+        message: 'Service temporarily unavailable',
+        details: 'Service protection is active'
+      });
+    }
+
+    try {
+      const result = await serviceGuard.fire(ISBN);
+      
+      if (result.data && Array.isArray(result.data) && result.data.length > 0) {
+        return res.status(200).json({
+          status: 'success',
+          count: result.data.length,
+          recommendations: result.data
+        });
       }
-    );
+      
+      return res.status(204).send();
+    } catch (error) {
+      if (error instanceof ServiceError) {
+        switch (error.type) {
+          case 'TIMEOUT':
+            return res.status(504).json({
+              status: 'timeout',
+              message: 'Service response timeout',
+              details: `Request exceeded ${REQUEST_TIMEOUT}ms limit`
+            });
+          case 'CONNECTION':
+            return res.status(503).json({
+              status: 'unavailable',
+              message: 'Service connection failed',
+              details: error.message
+            });
+          default:
+            return res.status(500).json({
+              status: 'error',
+              message: 'Service error',
+              details: error.message
+            });
+        }
+      }
 
-    const books = response.data;
+      if (error.message && error.message.includes('Breaker is open')) {
+        return res.status(503).json({
+          status: 'unavailable',
+          message: 'Service temporarily unavailable',
+          details: 'Service protection is active'
+        });
+      }
 
-    if (!Array.isArray(books) || books.length === 0) {
-      return res.status(204).send(); // No content
+      return res.status(500).json({
+        status: 'error',
+        message: 'Unexpected service error',
+        details: error.message
+      });
     }
-
-    // On success, close the circuit
-    circuitOpen = false;
-    lastFailureTime = null;
-
-    res.status(200).json(books);
   } catch (error) {
-    if (error.code === 'ECONNABORTED') {
-      // Timeout
-      circuitOpen = true;
-      lastFailureTime = Date.now();
-      return res
-        .status(504)
-        .json({ message: 'Recommendation service timed out' });
-    }
-
-    if (error.response && error.response.status >= 500) {
-      // Treat 5xx errors as circuit break triggers too
-      circuitOpen = true;
-      lastFailureTime = Date.now();
-    }
-
-    res
-      .status(500)
-      .json({ message: 'Failed to fetch related books', error: error.message });
+    return res.status(500).json({
+      status: 'error',
+      message: 'Internal server error',
+      details: error.message
+    });
   }
 });
 
