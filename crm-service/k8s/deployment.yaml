@@ -18,15 +18,33 @@ spec:
           image: yuchingt/crm-service:latest
           imagePullPolicy: Always
           ports:
-            - containerPort: 3000
+            - containerPort: 3002
           env:
-            - name: SMTP_USER
-              valueFrom:
-                secretKeyRef:
-                  name: smtp-credentials
-                  key: likedog1128@gmail.com
-            - name: SMTP_PASS
-              valueFrom:
-                secretKeyRef:
-                  name: smtp-credentials
-                  key: nafquajmaezwvhyd
+            # Email Configuration
+            - name: EMAIL_USER
+              value: "likedog1128@gmail.com"
+            - name: EMAIL_APP_PASSWORD
+              value: "nafquajmaezwvhyd"
+            - name: EMAIL_FROM
+              value: "Book Store <likedog1128@gmail.com>"
+            # Kafka Configuration
+            - name: KAFKA_BROKERS
+              value: "3.129.102.184:9092,18.118.230.221:9093,3.130.6.49:9094"
+            - name: KAFKA_GROUP_ID
+              value: "crm-service-group"
+            - name: KAFKA_TOPIC
+              value: "customer.events"
+            - name: KAFKA_SSL
+              value: "true"
+            # Service configuration
+            - name: PORT
+              value: "3002"
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 3002
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+      restartPolicy: Always

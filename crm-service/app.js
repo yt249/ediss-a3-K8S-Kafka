@@ -1,53 +1,42 @@
+// Load environment configuration
 require('dotenv').config();
-const { Kafka } = require('kafkajs');
-const nodemailer = require('nodemailer');
 
-// Kafka config
-const kafka = new Kafka({
-  clientId: 'crm-service',
-  brokers: [process.env.KAFKA_BROKER],
-});
+// Import dependencies
+const express = require('express');
+const { startEventConsumer } = require('./utils/eventConsumer');
 
-const topic = process.env.KAFKA_TOPIC;
-const consumer = kafka.consumer({ groupId: 'crm-group' });
+// Initialize application
+const app = express();
 
-// Email config
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
-
-// Main function
-async function start() {
-  await consumer.connect();
-  await consumer.subscribe({ topic, fromBeginning: true });
-
-  console.log(`✅ CRM Service is listening to ${topic}...`);
-
-  await consumer.run({
-    eachMessage: async ({ message }) => {
-      try {
-        const customer = JSON.parse(message.value.toString());
-
-        const mailOptions = {
-          from: `"Book Store CRM" <${process.env.SMTP_USER}>`,
-          to: customer.email,
-          subject: 'Activate your book store account',
-          text: `Dear ${customer.name},\nWelcome to the Book store created by <your-andrew-id>.\nExceptionally this time we won’t ask you to click a link to activate your account.`,
-        };
-
-        await transporter.sendMail(mailOptions);
-        console.log(`📧 Sent welcome email to ${customer.email}`);
-      } catch (err) {
-        console.error('❌ Failed to process message:', err.message);
-      }
-    },
+// Health monitoring endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString()
   });
-}
+});
 
-start().catch(console.error);
+// Service status endpoint
+app.get('/status', (req, res) => {
+  res.status(200).json({
+    service: 'CRM Service',
+    status: 'operational',
+    version: process.env.npm_package_version || '1.0.0'
+  });
+});
+
+// Start event consumer
+startEventConsumer()
+  .then(() => {
+    console.log('[App] Event consumer started successfully');
+  })
+  .catch(error => {
+    console.error('[App] Failed to start event consumer:', error);
+    process.exit(1);
+  });
+
+// Start HTTP server
+const PORT = process.env.PORT || 3002;
+app.listen(PORT, () => {
+  console.log(`[App] CRM Service listening on port ${PORT}`);
+});
