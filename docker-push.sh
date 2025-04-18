@@ -15,6 +15,7 @@ fi
 
 # Build and tag the image
 echo "Building image..."
+
 # docker build -t ${DOCKER_USERNAME}/bookstore-api:latest .
 docker build -f ../bff-web/Dockerfile -t ${DOCKER_USERNAME}/bff-web .
 docker build -f ../bff-mobile/Dockerfile -t ${DOCKER_USERNAME}/bff-mobile .

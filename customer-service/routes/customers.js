@@ -1,165 +1,135 @@
 const express = require('express');
-const router = express.Router();
 const db = require('../models/db');
+const { publishCustomerEvent } = require('../utils/kafka');
+const router = express.Router();
 
-// Validate email format
-const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-
-// Validate state abbreviation
-const validStates = new Set([
-  'AL',
-  'AK',
-  'AZ',
-  'AR',
-  'CA',
-  'CO',
-  'CT',
-  'DE',
-  'FL',
-  'GA',
-  'HI',
-  'ID',
-  'IL',
-  'IN',
-  'IA',
-  'KS',
-  'KY',
-  'LA',
-  'ME',
-  'MD',
-  'MA',
-  'MI',
-  'MN',
-  'MS',
-  'MO',
-  'MT',
-  'NE',
-  'NV',
-  'NH',
-  'NJ',
-  'NM',
-  'NY',
-  'NC',
-  'ND',
-  'OH',
-  'OK',
-  'OR',
-  'PA',
-  'RI',
-  'SC',
-  'SD',
-  'TN',
-  'TX',
-  'UT',
-  'VT',
-  'VA',
-  'WA',
-  'WV',
-  'WI',
-  'WY',
+// Validation constants
+const VALID_STATES = new Set([
+  'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
+  'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
+  'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+  'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC',
+  'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY'
 ]);
 
-// Add customer
-router.post('/', async (req, res) => {
-  const { userId, name, phone, address, address2, city, state, zipcode } =
-    req.body;
+// Validation functions
+const validateEmail = (email) => /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(email);
+const validateState = (state) => VALID_STATES.has(state);
+const validateRequiredFields = (fields) => {
+  const required = ['userId', 'name', 'phone', 'address', 'city', 'state', 'zipcode'];
+  return required.every(field => fields[field]);
+};
 
-  if (!userId || !name || !phone || !address || !city || !state || !zipcode) {
-    return res
-      .status(400)
-      .json({ message: 'All required fields must be provided' });
+// Create new customer
+router.post('/', async (req, res) => {
+  const customerData = req.body;
+
+  // Input validation
+  if (!validateRequiredFields(customerData)) {
+    return res.status(400).json({ message: 'Missing required fields' });
   }
 
-  if (!isValidEmail(userId)) {
+  if (!validateEmail(customerData.userId)) {
     return res.status(400).json({ message: 'Invalid email format' });
   }
 
-  if (!validStates.has(state)) {
-    return res.status(400).json({ message: 'Invalid US state abbreviation' });
+  if (!validateState(customerData.state)) {
+    return res.status(400).json({ message: 'Invalid state code' });
   }
 
   try {
+    // Check for duplicate email
     const [existing] = await db.query(
-      'SELECT * FROM customers WHERE userId = ?',
-      [userId]
+      'SELECT id FROM customers WHERE userId = ?',
+      [customerData.userId]
     );
+
     if (existing.length > 0) {
-      return res
-        .status(422)
-        .json({ message: 'This user ID already exists in the system.' });
+      return res.status(409).json({ message: 'Email already registered' });
     }
 
+    // Insert new customer
     const [result] = await db.query(
       'INSERT INTO customers (userId, name, phone, address, address2, city, state, zipcode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [userId, name, phone, address, address2, city, state, zipcode]
+      [
+        customerData.userId,
+        customerData.name,
+        customerData.phone,
+        customerData.address,
+        customerData.address2 || null,
+        customerData.city,
+        customerData.state,
+        customerData.zipcode
+      ]
     );
 
-    const customerId = result.insertId;
+    const newCustomer = {
+      id: result.insertId,
+      ...customerData
+    };
 
-    // ✅ Add `Location` header as required by Gradescope
+    // Publish event asynchronously
+    publishCustomerEvent('customer.registered', newCustomer)
+      .catch(err => console.error('Kafka publish error:', err));
+
+    // Return response
     res
       .status(201)
-      .set(
-        'Location',
-        `${req.protocol}://${req.get('host')}/customers/${customerId}`
-      )
-      .json({
-        id: customerId,
-        userId,
-        name,
-        phone,
-        address,
-        address2,
-        city,
-        state,
-        zipcode,
-      });
+      .set('Location', `${req.protocol}://${req.get('host')}/customers/${result.insertId}`)
+      .json(newCustomer);
   } catch (error) {
-    res.status(500).json({ message: 'Database error', error });
+    console.error('Database error:', error);
+    res.status(500).json({ message: 'Internal server error' });
   }
 });
 
-// Retrieve customer by ID
+// Get customer by ID
 router.get('/:id', async (req, res) => {
-  const { id } = req.params;
+  const customerId = parseInt(req.params.id);
 
-  if (!/^\d+$/.test(id)) {
+  if (isNaN(customerId)) {
     return res.status(400).json({ message: 'Invalid customer ID' });
   }
 
   try {
-    const [rows] = await db.query('SELECT * FROM customers WHERE id = ?', [id]);
+    const [customers] = await db.query(
+      'SELECT * FROM customers WHERE id = ?',
+      [customerId]
+    );
 
-    if (rows.length === 0) {
-      return res.status(404).json({ message: 'ID not found' });
+    if (customers.length === 0) {
+      return res.status(404).json({ message: 'Customer not found' });
     }
 
-    res.status(200).json(rows[0]);
+    res.json(customers[0]);
   } catch (error) {
-    res.status(500).json({ message: 'Database error', error });
+    console.error('Database error:', error);
+    res.status(500).json({ message: 'Internal server error' });
   }
 });
 
-// Retrieve customer by user ID
+// Get customer by email
 router.get('/', async (req, res) => {
   const { userId } = req.query;
 
-  if (!userId || !isValidEmail(userId)) {
+  if (!userId || !validateEmail(userId)) {
     return res.status(400).json({ message: 'Invalid email format' });
   }
 
   try {
-    const [rows] = await db.query('SELECT * FROM customers WHERE userId = ?', [
-      userId,
-    ]);
+    const [customers] = await db.query(
+      'SELECT * FROM customers WHERE userId = ?',
+      [userId]
+    );
 
-    if (rows.length === 0) {
-      return res.status(404).json({ message: 'User-ID not found' });
+    if (customers.length === 0) {
+      return res.status(404).json({ message: 'Customer not found' });
     }
 
-    res.status(200).json(rows[0]);
+    res.json(customers[0]);
   } catch (error) {
-    res.status(500).json({ message: 'Database error', error });
+    console.error('Database error:', error);
+    res.status(500).json({ message: 'Internal server error' });
   }
 });
 
