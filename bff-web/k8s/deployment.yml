@@ -20,9 +20,9 @@ spec:
           env:
             # URL THING
             - name: BOOKS_SERVICE_URL
-              value: 'http://a01bfd4054733407e8caf806a82d9e56-1335591145.us-east-1.elb.amazonaws.com:3000'
+              value: 'http://book-service.bookstore-ns.svc.cluster.local'
             - name: CUSTOMERS_SERVICE_URL
-              value: 'http://ac251973c93cd4c1eb7e948721d2d2fb-610715989.us-east-1.elb.amazonaws.com:3000'
+              value: 'http://customer-service.bookstore-ns.svc.cluster.local'
 
             # DB THING
             - name: DB_HOST
