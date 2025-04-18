@@ -16,11 +16,27 @@ spec:
       containers:
         - name: customer-service
           image: yuchingt/customer-service:latest
+          imagePullPolicy: Always
+          env:
+            # URL THING
+            - name: BOOKS_SERVICE_URL
+              value: 'http://a01bfd4054733407e8caf806a82d9e56-1335591145.us-east-1.elb.amazonaws.com:3000'
+            - name: CUSTOMERS_SERVICE_URL
+              value: 'http://ac251973c93cd4c1eb7e948721d2d2fb-610715989.us-east-1.elb.amazonaws.com:3000'
+
+            # DB THING
+            - name: DB_HOST
+              value: 'bookstore-db-dev.cluster-xyz.us-east-1.rds.amazonaws.com'
+            - name: DB_PORT
+              value: '3306'
+            - name: DB_USER
+              value: 'admin'
+            - name: DB_PASSWORD
+              value: 'adminadmin'
+            - name: DB_NAME
+              value: 'bookstore'
           ports:
             - containerPort: 3000
-          envFrom:
-            - configMapRef:
-                name: customer-service-config
           livenessProbe:
             httpGet:
               path: /status

@@ -16,14 +16,17 @@ spec:
       containers:
         - name: crm-service
           image: yuchingt/crm-service:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 3000
-          envFrom:
-            - configMapRef:
-                name: crm-service-config
-          livenessProbe:
-            httpGet:
-              path: /status
-              port: 3000
-            initialDelaySeconds: 5
-            periodSeconds: 10
+          env:
+            - name: SMTP_USER
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-credentials
+                  key: likedog1128@gmail.com
+            - name: SMTP_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-credentials
+                  key: nafquajmaezwvhyd
